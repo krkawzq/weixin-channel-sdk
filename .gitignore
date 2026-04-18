@@ -1,0 +1,41 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test/type/lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime state and secrets
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+.weixin-channel/
+account-session.json
+*.cursor.json
+*.seen.json
+*.pause.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
