@@ -1,4 +1,4 @@
-# weixin-channel
+# weixin-channel-sdk
 
 Unofficial Python SDK for the Weixin ClawBot/iLink channel protocol.
 
@@ -40,7 +40,7 @@ Weixin channel SDK for direct developer integration.
 ## Install
 
 ```bash
-pip install weixin-channel
+pip install weixin-channel-sdk
 ```
 
 For local development:
