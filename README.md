@@ -12,11 +12,14 @@ developer integrations:
 
 - QR-code login
 - QR login progress events for custom UIs
+- iLink app headers and QR login redirect handling
 - token/session persistence
 - multi-account session index
 - `getupdates` long polling
 - `sendmessage` text replies
 - text chunking
+- item-level inbound messages with `IncomingMessage`
+- developer-friendly `reply_*`, `download()`, and `save()` helpers
 - persistent message de-duplication
 - cursor persistence
 - typing indicator helpers
@@ -33,6 +36,7 @@ developer integrations:
 - synchronous wrapper for simple scripts
 - persisted session pause after token expiration
 - configurable retry, media limits, auto-thumbnail, and concurrency modes
+- CDN `upload_full_url` / inbound media `full_url` compatibility
 
 OpenClaw runtime adapters are intentionally not included. This package is a pure
 Weixin channel SDK for direct developer integration.
@@ -61,17 +65,20 @@ async def main() -> None:
     if not client.session:
         client = await WeixinClient.login()
 
-    bot = WeixinBot(client)
+    bot = WeixinBot(client, item_level=True)
 
     @bot.on_text
     async def echo(msg):
-        return f"echo: {msg.text()}"
+        await msg.reply_text(f"echo: {msg.text}")
 
     await bot.run_forever()
 
 
 asyncio.run(main())
 ```
+
+For lower-level integrations, keep `item_level=False` and handlers will receive
+the raw `WeixinMessage` object.
 
 ## Access Policy
 
@@ -220,3 +227,11 @@ Recommended runtime modes:
 For long-running bridges, `seen_flush_interval` controls how often processed
 message ids are flushed to disk. Larger values reduce I/O; smaller values reduce
 duplicate risk after crashes.
+
+## Roadmap
+
+See [docs/roadmap-0.2.0.md](docs/roadmap-0.2.0.md) for the 0.2.0 design plan,
+including protocol parity work, item-level high-level APIs, emoji translation,
+streaming Markdown filtering, ACL helpers, and CLI extensions. The detailed
+engineering audit and implementation checklist lives in
+[docs/optimization-audit-0.2.0.md](docs/optimization-audit-0.2.0.md).

@@ -9,6 +9,9 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+from .errors import WeixinConfigError
 
 
 def random_wechat_uin() -> str:
@@ -26,7 +29,10 @@ def json_dumps_compact(value: Any) -> str:
 
 
 def ensure_base_url(url: str) -> str:
-    return url.rstrip("/")
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise WeixinConfigError("base_url must be an absolute http(s) URL")
+    return url.strip().rstrip("/")
 
 
 def default_state_dir() -> Path:

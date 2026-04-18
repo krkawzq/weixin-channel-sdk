@@ -58,6 +58,7 @@ class CDNMedia(_Model):
     encrypt_query_param: str | None = None
     aes_key: str | None = None
     encrypt_type: int | None = None
+    full_url: str | None = None
 
 
 class ImageItem(_Model):
@@ -212,6 +213,15 @@ class GetUpdatesResponse(_Model):
     get_updates_buf: str | None = None
     longpolling_timeout_ms: int | None = None
 
+    def error_code(self) -> int | None:
+        for value in (self.errcode, self.ret):
+            if isinstance(value, int) and value != 0:
+                return value
+        return None
+
+    def is_ok(self) -> bool:
+        return self.error_code() is None
+
 
 class QrCodeResponse(_Model):
     qrcode: str
@@ -219,11 +229,12 @@ class QrCodeResponse(_Model):
 
 
 class QrStatusResponse(_Model):
-    status: Literal["wait", "scaned", "confirmed", "expired"]
+    status: Literal["wait", "scaned", "scaned_but_redirect", "confirmed", "expired"]
     bot_token: str | None = None
     ilink_bot_id: str | None = None
     baseurl: str | None = None
     ilink_user_id: str | None = None
+    redirect_host: str | None = None
 
 
 class GetConfigResponse(_Model):
@@ -234,7 +245,9 @@ class GetConfigResponse(_Model):
 
 class GetUploadUrlResponse(_Model):
     upload_param: str | None = None
+    upload_full_url: str | None = None
     thumb_upload_param: str | None = None
+    thumb_upload_full_url: str | None = None
 
 
 class UploadedMedia(_Model):

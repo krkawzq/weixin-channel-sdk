@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from .api import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CDN_BASE_URL, WeixinApi
@@ -34,6 +36,9 @@ from .store import StateStore
 from .text import markdown_to_plain_text
 from .thumbnail import make_thumbnail
 from .utils import generate_client_id
+
+if TYPE_CHECKING:
+    from .incoming import IncomingMessage
 
 
 QrRenderer = Callable[[str], None]
@@ -110,11 +115,13 @@ class WeixinClient:
             route_tag=route_tag,
             trust_env=trust_env,
         )
-        self._seen_message_ids: set[int] = set()
+        self._seen_message_ids: OrderedDict[int, None] = OrderedDict()
         self._typing_cache: dict[str, _TypingCacheEntry] = {}
         self._seen_dirty_count = 0
         if session and session.account_id:
-            self._seen_message_ids.update(self.store.load_seen_message_ids(session.account_id))
+            self._seen_message_ids.update(
+                (message_id, None) for message_id in self.store.load_seen_message_ids(session.account_id)
+            )
             remaining = self.store.load_pause_remaining(session.account_id)
             if remaining > 0:
                 self._session_paused_until = time.monotonic() + remaining
@@ -157,6 +164,7 @@ class WeixinClient:
                 status = await cls._wait_for_login(
                     api,
                     qr.qrcode,
+                    base_url=base_url,
                     deadline=deadline,
                 )
                 if status.status == "confirmed":
@@ -207,8 +215,19 @@ class WeixinClient:
             while loop.time() < deadline:
                 qr = await api.get_bot_qrcode(bot_type=bot_type)
                 yield LoginEvent("qrcode", "Scan this QR code in Weixin.", qrcode_url=qr.qrcode_img_content)
-                status = await cls._wait_for_login(api, qr.qrcode, deadline=deadline)
-                yield LoginEvent(status.status, f"QR login status: {status.status}", status=status)
+                status = QrStatusResponse(status="wait")
+                polling_base_url = base_url
+                while loop.time() < deadline:
+                    status = await api.get_qrcode_status(qr.qrcode, base_url=polling_base_url)
+                    if status.status == "scaned_but_redirect":
+                        if status.redirect_host:
+                            polling_base_url = _redirect_base_url(status.redirect_host)
+                        yield LoginEvent("redirected", "QR login redirected.", status=status)
+                    else:
+                        yield LoginEvent(status.status, f"QR login status: {status.status}", status=status)
+                    if status.status in {"confirmed", "expired"}:
+                        break
+                    await asyncio.sleep(1.0)
                 if status.status == "confirmed":
                     if not status.bot_token:
                         raise WeixinLoginError("login confirmed but bot_token was missing")
@@ -234,10 +253,17 @@ class WeixinClient:
         api: WeixinApi,
         qrcode: str,
         *,
+        base_url: str,
         deadline: float,
     ) -> QrStatusResponse:
+        polling_base_url = base_url
         while asyncio.get_running_loop().time() < deadline:
-            status = await api.get_qrcode_status(qrcode)
+            status = await api.get_qrcode_status(qrcode, base_url=polling_base_url)
+            if status.status == "scaned_but_redirect":
+                if status.redirect_host:
+                    polling_base_url = _redirect_base_url(status.redirect_host)
+                await asyncio.sleep(1.0)
+                continue
             if status.status in {"confirmed", "expired"}:
                 return status
             await asyncio.sleep(1.0)
@@ -308,8 +334,11 @@ class WeixinClient:
             for msg in resp.msgs:
                 if dedupe and msg.message_id is not None:
                     if msg.message_id in self._seen_message_ids:
+                        self._seen_message_ids.move_to_end(msg.message_id)
                         continue
-                    self._seen_message_ids.add(msg.message_id)
+                    self._seen_message_ids[msg.message_id] = None
+                    if len(self._seen_message_ids) > self.retry.seen_cache_limit:
+                        self._seen_message_ids.popitem(last=False)
                     if session.account_id:
                         self._seen_dirty_count += 1
                         if self._seen_dirty_count >= self.retry.seen_flush_interval:
@@ -319,6 +348,28 @@ class WeixinClient:
 
             if not yielded:
                 await asyncio.sleep(sleep_on_empty_s)
+
+    async def incoming_messages(
+        self,
+        *,
+        dedupe: bool = True,
+        sleep_on_empty_s: float = 0.2,
+        retry_delay_s: float | None = None,
+        backoff_delay_s: float | None = None,
+        max_consecutive_failures: int | None = None,
+    ) -> AsyncIterator["IncomingMessage"]:
+        """Yield item-level inbound messages for developer-friendly handlers."""
+        from .incoming import IncomingMessage
+
+        async for msg in self.poll_messages(
+            dedupe=dedupe,
+            sleep_on_empty_s=sleep_on_empty_s,
+            retry_delay_s=retry_delay_s,
+            backoff_delay_s=backoff_delay_s,
+            max_consecutive_failures=max_consecutive_failures,
+        ):
+            for item in msg.item_list:
+                yield IncomingMessage(client=self, raw_message=msg, item=item)
 
     async def send_text(
         self,
@@ -348,6 +399,23 @@ class WeixinClient:
             )
             last_client_id = resolved_client_id
         return last_client_id
+
+    async def send_markdown(
+        self,
+        *,
+        to_user_id: str,
+        markdown: str,
+        context_token: str,
+        client_id: str | None = None,
+        chunk_limit: int = 4000,
+    ) -> str:
+        return await self.send_text(
+            to_user_id=to_user_id,
+            text=markdown_to_plain_text(markdown),
+            context_token=context_token,
+            client_id=client_id,
+            chunk_limit=chunk_limit,
+        )
 
     async def send_media_file(
         self,
@@ -383,6 +451,7 @@ class WeixinClient:
             to_user_id=to_user_id,
             media_type=media_type,
             cdn_base_url=cdn_base_url or self.cdn_base_url,
+            http_client=self.api._ensure_client(),
             thumb_path=resolved_thumb,
         )
         return await self.send_uploaded_media(
@@ -444,6 +513,20 @@ class WeixinClient:
             client_id=client_id,
         )
 
+    async def reply_markdown(
+        self,
+        message: WeixinMessage,
+        markdown: str,
+        *,
+        client_id: str | None = None,
+    ) -> str:
+        return await self.send_markdown(
+            to_user_id=message.sender_id,
+            markdown=markdown,
+            context_token=message.context_token or "",
+            client_id=client_id,
+        )
+
     async def reply_media_file(
         self,
         message: WeixinMessage,
@@ -478,6 +561,7 @@ class WeixinClient:
         local_path = await download_remote_file(
             url,
             dest_dir=dest,
+            http_client=self.api._ensure_client(),
             max_bytes=self.media.max_download_bytes,
         )
         return await self.send_media_file(
@@ -521,6 +605,7 @@ class WeixinClient:
                 item,
                 dest_dir=dest_dir,
                 cdn_base_url=cdn_base_url or self.cdn_base_url,
+                http_client=self.api._ensure_client(),
                 voice_converter=voice_converter,
                 max_bytes=self.media.max_download_bytes,
             )
@@ -596,9 +681,9 @@ class WeixinClient:
     def flush_seen_message_ids(self) -> None:
         if not self.session or not self.session.account_id or self._seen_dirty_count <= 0:
             return
-        retained = sorted(self._seen_message_ids)[-1000:]
+        retained = list(self._seen_message_ids.keys())[-self.retry.seen_cache_limit :]
         self.store.save_seen_message_ids(retained, self.session.account_id)
-        self._seen_message_ids = set(retained)
+        self._seen_message_ids = OrderedDict((message_id, None) for message_id in retained)
         self._seen_dirty_count = 0
 
     @asynccontextmanager
@@ -618,7 +703,27 @@ def quote_qrcode(qrcode: str) -> str:
     return quote(qrcode, safe="")
 
 
+def _redirect_base_url(redirect_host: str) -> str:
+    host = redirect_host.strip().rstrip("/")
+    if host.startswith(("http://", "https://")):
+        return host
+    return f"https://{host}"
+
+
 def _chunk_text(text: str, limit: int) -> list[str]:
-    if limit <= 0 or len(text) <= limit:
+    if limit <= 0 or len(text.encode("utf-8")) <= limit:
         return [text]
-    return [text[i : i + limit] for i in range(0, len(text), limit)]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+    for char in text:
+        char_size = len(char.encode("utf-8"))
+        if current and current_size + char_size > limit:
+            chunks.append("".join(current))
+            current = []
+            current_size = 0
+        current.append(char)
+        current_size += char_size
+    if current:
+        chunks.append("".join(current))
+    return chunks or [text]

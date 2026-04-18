@@ -30,6 +30,19 @@ def build_cdn_download_url(encrypted_query_param: str, cdn_base_url: str = DEFAU
     return f"{cdn_base_url.rstrip('/')}/download?encrypted_query_param={quote(encrypted_query_param, safe='')}"
 
 
+def resolve_cdn_download_url(
+    *,
+    encrypted_query_param: str | None = None,
+    full_url: str | None = None,
+    cdn_base_url: str = DEFAULT_CDN_BASE_URL,
+) -> str | None:
+    if full_url and full_url.strip():
+        return full_url.strip()
+    if encrypted_query_param:
+        return build_cdn_download_url(encrypted_query_param, cdn_base_url)
+    return None
+
+
 def build_cdn_upload_url(
     *,
     upload_param: str,
@@ -45,7 +58,8 @@ def build_cdn_upload_url(
 async def upload_buffer_to_cdn(
     *,
     buffer: bytes,
-    upload_param: str,
+    upload_param: str | None = None,
+    upload_full_url: str | None = None,
     filekey: str,
     aeskey: bytes,
     cdn_base_url: str = DEFAULT_CDN_BASE_URL,
@@ -53,7 +67,12 @@ async def upload_buffer_to_cdn(
     max_retries: int = 3,
 ) -> str:
     ciphertext = encrypt_aes_128_ecb(buffer, aeskey)
-    url = build_cdn_upload_url(upload_param=upload_param, filekey=filekey, cdn_base_url=cdn_base_url)
+    if upload_full_url and upload_full_url.strip():
+        url = upload_full_url.strip()
+    elif upload_param:
+        url = build_cdn_upload_url(upload_param=upload_param, filekey=filekey, cdn_base_url=cdn_base_url)
+    else:
+        raise RuntimeError("CDN upload URL missing: need upload_full_url or upload_param")
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient()
     try:
@@ -128,22 +147,24 @@ async def upload_media_file(
         no_need_thumb=thumb_data is None,
         aeskey=aeskey_hex,
     )
-    if not upload_url.upload_param:
-        raise RuntimeError("getuploadurl returned no upload_param")
+    if not upload_url.upload_full_url and not upload_url.upload_param:
+        raise RuntimeError("getuploadurl returned no upload URL")
 
     download_param = await upload_buffer_to_cdn(
         buffer=data,
         upload_param=upload_url.upload_param,
+        upload_full_url=upload_url.upload_full_url,
         filekey=filekey,
         aeskey=aeskey,
         cdn_base_url=cdn_base_url,
         http_client=http_client,
     )
     thumb_download_param: str | None = None
-    if thumb_data is not None and upload_url.thumb_upload_param:
+    if thumb_data is not None and (upload_url.thumb_upload_full_url or upload_url.thumb_upload_param):
         thumb_download_param = await upload_buffer_to_cdn(
             buffer=thumb_data,
             upload_param=upload_url.thumb_upload_param,
+            upload_full_url=upload_url.thumb_upload_full_url,
             filekey=filekey,
             aeskey=aeskey,
             cdn_base_url=cdn_base_url,
@@ -175,16 +196,21 @@ async def download_remote_file(
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient()
     try:
-        res = await client.get(url, timeout=60.0)
-        res.raise_for_status()
-        if max_bytes is not None and len(res.content) > max_bytes:
-            raise RuntimeError(f"remote media exceeds max_bytes={max_bytes}")
-        content_type = res.headers.get("content-type")
+        chunks: list[bytes] = []
+        total = 0
+        async with client.stream("GET", url, timeout=60.0) as res:
+            res.raise_for_status()
+            content_type = res.headers.get("content-type")
+            async for chunk in res.aiter_bytes():
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise RuntimeError(f"remote media exceeds max_bytes={max_bytes}")
+                chunks.append(chunk)
         ext = extension_for_mime(content_type, url)
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         file_path = dest / f"{generate_client_id('weixin-remote').replace(':', '-')}{ext}"
-        file_path.write_bytes(res.content)
+        file_path.write_bytes(b"".join(chunks))
         return file_path
     finally:
         if owns_client:
@@ -255,27 +281,29 @@ def build_media_message_item(uploaded: UploadedMedia) -> dict:
     }
 
 
-def _media_for_item(item: MessageItem) -> tuple[str | None, bytes | None, str | None, str | None]:
+def _media_for_item(
+    item: MessageItem,
+) -> tuple[str | None, str | None, bytes | None, str | None, str | None]:
     item_type = item.item_type()
     if item_type == MessageItemType.IMAGE and item.image_item and item.image_item.media:
         media = item.image_item.media
         key = bytes.fromhex(item.image_item.aeskey) if item.image_item.aeskey else (
             parse_cdn_aes_key(media.aes_key) if media.aes_key else None
         )
-        return media.encrypt_query_param, key, None, "image"
+        return media.encrypt_query_param, media.full_url, key, None, "image"
     if item_type == MessageItemType.VOICE and item.voice_item and item.voice_item.media:
         media = item.voice_item.media
         key = parse_cdn_aes_key(media.aes_key) if media.aes_key else None
-        return media.encrypt_query_param, key, None, "voice"
+        return media.encrypt_query_param, media.full_url, key, None, "voice"
     if item_type == MessageItemType.FILE and item.file_item and item.file_item.media:
         media = item.file_item.media
         key = parse_cdn_aes_key(media.aes_key) if media.aes_key else None
-        return media.encrypt_query_param, key, item.file_item.file_name, "file"
+        return media.encrypt_query_param, media.full_url, key, item.file_item.file_name, "file"
     if item_type == MessageItemType.VIDEO and item.video_item and item.video_item.media:
         media = item.video_item.media
         key = parse_cdn_aes_key(media.aes_key) if media.aes_key else None
-        return media.encrypt_query_param, key, None, "video"
-    return None, None, None, None
+        return media.encrypt_query_param, media.full_url, key, None, "video"
+    return None, None, None, None, None
 
 
 async def download_media_item(
@@ -287,19 +315,28 @@ async def download_media_item(
     voice_converter: VoiceConverter | None = None,
     max_bytes: int | None = None,
 ) -> DownloadedMedia | None:
-    encrypted_param, aeskey, file_name, label = _media_for_item(item)
-    if not encrypted_param:
+    encrypted_param, full_url, aeskey, file_name, label = _media_for_item(item)
+    url = resolve_cdn_download_url(
+        encrypted_query_param=encrypted_param,
+        full_url=full_url,
+        cdn_base_url=cdn_base_url,
+    )
+    if not url:
         return None
 
-    url = build_cdn_download_url(encrypted_param, cdn_base_url)
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient()
     try:
-        res = await client.get(url, timeout=60.0)
-        res.raise_for_status()
-        data = res.content
-        if max_bytes is not None and len(data) > max_bytes:
-            raise RuntimeError(f"inbound media exceeds max_bytes={max_bytes}")
+        chunks: list[bytes] = []
+        total = 0
+        async with client.stream("GET", url, timeout=60.0) as res:
+            res.raise_for_status()
+            async for chunk in res.aiter_bytes():
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise RuntimeError(f"inbound media exceeds max_bytes={max_bytes}")
+                chunks.append(chunk)
+        data = b"".join(chunks)
     finally:
         if owns_client:
             await client.aclose()

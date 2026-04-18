@@ -25,7 +25,19 @@ DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 DEFAULT_BOT_TYPE = "3"
 DEFAULT_CHANNEL_VERSION = "1.0.2"
+DEFAULT_ILINK_APP_ID = "bot"
+DEFAULT_ILINK_CLIENT_VERSION_STR = "2.1.8"
 SESSION_EXPIRED_ERRCODE = -14
+
+
+def encode_client_version(version: str) -> int:
+    """Encode a dotted iLink client version into the integer header value."""
+    parts = (version.split(".") + ["0", "0", "0"])[:3]
+    try:
+        major, minor, patch = (int(part) for part in parts)
+    except ValueError:
+        major = minor = patch = 0
+    return ((major & 0xFF) << 16) | ((minor & 0xFF) << 8) | (patch & 0xFF)
 
 
 class WeixinApi:
@@ -38,6 +50,8 @@ class WeixinApi:
         token: str | None = None,
         route_tag: str | None = None,
         channel_version: str = DEFAULT_CHANNEL_VERSION,
+        ilink_app_id: str = DEFAULT_ILINK_APP_ID,
+        ilink_client_version: int | str = encode_client_version(DEFAULT_ILINK_CLIENT_VERSION_STR),
         timeout: float = 15.0,
         long_poll_timeout: float = 38.0,
         http_client: httpx.AsyncClient | None = None,
@@ -47,6 +61,8 @@ class WeixinApi:
         self.token = token
         self.route_tag = route_tag
         self.channel_version = channel_version
+        self.ilink_app_id = ilink_app_id
+        self.ilink_client_version = str(ilink_client_version)
         self.timeout = timeout
         self.long_poll_timeout = long_poll_timeout
         self.trust_env = trust_env
@@ -73,11 +89,21 @@ class WeixinApi:
             await self._client.aclose()
         self._client = None
 
-    def _url(self, path: str) -> str:
-        return f"{self.base_url}/{path.lstrip('/')}"
+    def _url(self, path: str, *, base_url: str | None = None) -> str:
+        return f"{ensure_base_url(base_url or self.base_url)}/{path.lstrip('/')}"
+
+    def _common_headers(self) -> dict[str, str]:
+        headers = {
+            "iLink-App-Id": self.ilink_app_id,
+            "iLink-App-ClientVersion": self.ilink_client_version,
+        }
+        if self.route_tag:
+            headers["SKRouteTag"] = self.route_tag
+        return headers
 
     def _headers(self, body: str | None = None, *, token: str | None = None) -> dict[str, str]:
         headers = {
+            **self._common_headers(),
             "Content-Type": "application/json",
             "AuthorizationType": "ilink_bot_token",
             "X-WECHAT-UIN": random_wechat_uin(),
@@ -87,8 +113,6 @@ class WeixinApi:
         resolved_token = token if token is not None else self.token
         if resolved_token:
             headers["Authorization"] = f"Bearer {resolved_token.strip()}"
-        if self.route_tag:
-            headers["SKRouteTag"] = self.route_tag
         return headers
 
     def _with_base_info(self, body: JsonDict) -> JsonDict:
@@ -101,10 +125,16 @@ class WeixinApi:
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
         treat_timeout_as_empty: bool = False,
+        base_url: str | None = None,
     ) -> JsonDict:
         client = self._ensure_client()
+        resolved_headers = {**self._common_headers(), **(headers or {})}
         try:
-            res = await client.get(self._url(path), headers=headers, timeout=timeout or self.timeout)
+            res = await client.get(
+                self._url(path, base_url=base_url),
+                headers=resolved_headers,
+                timeout=timeout or self.timeout,
+            )
         except (httpx.TimeoutException, asyncio.TimeoutError):
             if treat_timeout_as_empty:
                 return {}
@@ -175,43 +205,47 @@ class WeixinApi:
             ) from exc
         if not isinstance(data, dict):
             raise WeixinApiError(f"POST {path} returned non-object JSON")
-        errcode = data.get("errcode", data.get("ret"))
-        if errcode == SESSION_EXPIRED_ERRCODE:
+        ret = data.get("ret")
+        explicit_errcode = data.get("errcode")
+        if ret == SESSION_EXPIRED_ERRCODE or explicit_errcode == SESSION_EXPIRED_ERRCODE:
             raise WeixinSessionExpired(
                 "Weixin bot session expired",
                 errcode=SESSION_EXPIRED_ERRCODE,
                 response_text=text,
             )
         if raise_on_ret_error:
-            ret = data.get("ret")
-            explicit_errcode = data.get("errcode")
             if (isinstance(ret, int) and ret != 0) or (
                 isinstance(explicit_errcode, int) and explicit_errcode != 0
             ):
+                error_code = (
+                    explicit_errcode
+                    if isinstance(explicit_errcode, int) and explicit_errcode != 0
+                    else ret
+                )
                 raise WeixinApiError(
                     f"POST {path} returned API error ret={ret} errcode={explicit_errcode}",
-                    errcode=explicit_errcode if isinstance(explicit_errcode, int) else ret,
+                    errcode=error_code if isinstance(error_code, int) else None,
                     response_text=text,
                 )
         return data
 
     async def get_bot_qrcode(self, *, bot_type: str = DEFAULT_BOT_TYPE) -> QrCodeResponse:
-        headers = {"SKRouteTag": self.route_tag} if self.route_tag else None
         data = await self._get_json(
-            f"ilink/bot/get_bot_qrcode?bot_type={bot_type}",
-            headers=headers,
+            f"ilink/bot/get_bot_qrcode?bot_type={quote(bot_type, safe='')}",
         )
         return QrCodeResponse.model_validate(data)
 
-    async def get_qrcode_status(self, qrcode: str) -> QrStatusResponse:
-        headers = {"iLink-App-ClientVersion": "1"}
-        if self.route_tag:
-            headers["SKRouteTag"] = self.route_tag
+    async def get_qrcode_status(
+        self,
+        qrcode: str,
+        *,
+        base_url: str | None = None,
+    ) -> QrStatusResponse:
         data = await self._get_json(
             f"ilink/bot/get_qrcode_status?qrcode={quote(qrcode, safe='')}",
-            headers=headers,
             timeout=self.long_poll_timeout,
             treat_timeout_as_empty=True,
+            base_url=base_url,
         )
         if not data:
             return QrStatusResponse(status="wait")
@@ -227,7 +261,15 @@ class WeixinApi:
         )
         if not data:
             return GetUpdatesResponse(ret=0, msgs=[], get_updates_buf=cursor)
-        return GetUpdatesResponse.model_validate(data)
+        resp = GetUpdatesResponse.model_validate(data)
+        error_code = resp.error_code()
+        if error_code is not None:
+            raise WeixinApiError(
+                f"POST ilink/bot/getupdates returned API error ret={resp.ret} errcode={resp.errcode}",
+                errcode=error_code,
+                response_text=json_dumps_compact(data),
+            )
+        return resp
 
     async def send_message(self, body: JsonDict) -> None:
         await self._post_json("ilink/bot/sendmessage", body, timeout=self.timeout)

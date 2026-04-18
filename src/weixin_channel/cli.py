@@ -68,6 +68,10 @@ async def run_login(args: argparse.Namespace) -> int:
             print("Scanned. Please confirm in Weixin...")
             continue
 
+        if event.type == "redirected":
+            print("Login polling redirected. Continuing...")
+            continue
+
         if event.type == "wait":
             print(".", end="", flush=True)
             continue

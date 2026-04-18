@@ -5,10 +5,14 @@ from .api import (
     DEFAULT_BOT_TYPE,
     DEFAULT_CDN_BASE_URL,
     DEFAULT_CHANNEL_VERSION,
+    DEFAULT_ILINK_APP_ID,
+    DEFAULT_ILINK_CLIENT_VERSION_STR,
     WeixinApi,
+    encode_client_version,
 )
 from .bot import WeixinBot
 from .events import BotEvent
+from .incoming import IncomingMessage
 from .client import LoginEvent, WeixinClient, terminal_qr_renderer
 from .config import ConcurrencyConfig, MediaConfig, RetryConfig, SessionGuardConfig
 from .errors import (
@@ -56,6 +60,7 @@ from .cdn import (
     download_media_item,
     download_remote_file,
     media_type_for_file,
+    resolve_cdn_download_url,
     upload_media_file,
 )
 from .crypto import (
@@ -65,7 +70,7 @@ from .crypto import (
     parse_cdn_aes_key,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -76,12 +81,15 @@ __all__ = [
     "DEFAULT_BOT_TYPE",
     "DEFAULT_CDN_BASE_URL",
     "DEFAULT_CHANNEL_VERSION",
+    "DEFAULT_ILINK_APP_ID",
+    "DEFAULT_ILINK_CLIENT_VERSION_STR",
     "DownloadedMedia",
     "FileItem",
     "GetConfigResponse",
     "GetUploadUrlResponse",
     "GetUpdatesResponse",
     "ImageItem",
+    "IncomingMessage",
     "LoginEvent",
     "MediaConfig",
     "MessageItem",
@@ -123,9 +131,11 @@ __all__ = [
     "decrypt_aes_128_ecb",
     "download_media_item",
     "download_remote_file",
+    "encode_client_version",
     "encrypt_aes_128_ecb",
     "media_type_for_file",
     "parse_cdn_aes_key",
+    "resolve_cdn_download_url",
     "upload_media_file",
     "markdown_to_plain_text",
     "make_thumbnail",
